@@ -1,16 +1,329 @@
 from flask import Flask, render_template, request
 from google import genai
+from groq import Groq
+from tavily import TavilyClient
 from dotenv import load_dotenv
 import os
 
+# ==========================================================
+# LOAD ENVIRONMENT
+# ==========================================================
+
 load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+# ==========================================================
+# FLASK
+# ==========================================================
 
 app = Flask(__name__)
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
+# ==========================================================
+# AI CLIENTS
+# ==========================================================
 
+gemini_client = None
+groq_client = None
+tavily_client = None
+
+if GEMINI_API_KEY:
+    gemini_client = genai.Client(
+        api_key=GEMINI_API_KEY
+    )
+
+if GROQ_API_KEY:
+    groq_client = Groq(
+        api_key=GROQ_API_KEY
+    )
+
+if TAVILY_API_KEY:
+    tavily_client = TavilyClient(
+        api_key=TAVILY_API_KEY
+    )
+
+# ==========================================================
+# AIMI INSTRUCTION
+# ==========================================================
+
+aimi_instruction = """
+You are Aimi, a friendly, intelligent, helpful, and reliable AI assistant.
+
+Your goal is to understand the user's request and provide the most useful
+answer in a clear, simple, and organized way.
+
+PERSONALITY:
+
+- Friendly
+- Helpful
+- Calm
+- Clear
+- Encouraging
+- Professional
+
+IMPORTANT:
+
+If CURRENT WEB INFORMATION is provided below, use it as the primary source
+for current facts.
+
+Do not contradict reliable current search information using old knowledge.
+
+If the search information is insufficient, clearly say that the information
+could not be verified.
+
+GREETING RULE:
+
+- Begin every response with a short friendly greeting.
+- Use "Hello!", "Hi!", or "Hey there!"
+- Keep the greeting short.
+
+CLOSURE RULE:
+
+- End every response with a short friendly closing.
+
+ANSWER RULES:
+
+1. Understand the user's question before answering.
+
+2. Answer directly.
+
+3. Use simple and easy-to-understand language.
+
+4. Give accurate and relevant information.
+
+5. Keep paragraphs short.
+
+6. For multiple points, use numbered lists.
+
+7. Every numbered point must be on a separate line.
+
+8. Leave one blank line between numbered points.
+
+9. Every bullet point must be on a separate line.
+
+10. Use headings when useful.
+
+11. Headings must be plain text.
+
+12. Do NOT use bold, italic, hashtags, horizontal lines,
+    Markdown tables, or Markdown code blocks.
+
+13. Do not use unnecessary emojis.
+
+14. If the user asks for steps, explain them in numbered order.
+
+15. If the user asks for advantages, disadvantages, features,
+    benefits, examples, or ideas, use numbered points.
+
+16. If the user asks for a comparison, use a clear point-by-point structure.
+
+17. If the user asks for code, provide clean and properly formatted code.
+
+18. If the user asks for an explanation, explain it simply.
+
+19. Never claim that you performed an action that you did not perform.
+
+20. Never invent information.
+
+21. If current web information is provided, prioritize it.
+
+FINAL FORMAT CHECK:
+
+- Numbered points must be on separate lines.
+- Bullet points must be on separate lines.
+- Headings must contain no Markdown symbols.
+- Keep the answer clear and readable.
+"""
+
+# ==========================================================
+# DETECT CURRENT INFORMATION QUESTIONS
+# ==========================================================
+
+def is_current_question(prompt):
+
+    current_keywords = [
+        "current",
+        "currently",
+        "latest",
+        "today",
+        "today's",
+        "now",
+        "right now",
+        "recent",
+        "recently",
+        "this week",
+        "this month",
+        "this year",
+        "who is the cm",
+        "who is the chief minister",
+        "who is the prime minister",
+        "who is the president",
+        "who is the governor",
+        "latest news",
+        "current news",
+        "current price",
+        "latest price",
+        "recent update",
+        "recent updates",
+        "new update",
+        "new updates",
+        "what happened today",
+        "who won",
+        "latest result"
+    ]
+
+    question = prompt.lower().strip()
+
+    return any(
+        keyword in question
+        for keyword in current_keywords
+    )
+
+
+# ==========================================================
+# TAVILY SEARCH
+# ==========================================================
+
+def search_web(prompt):
+
+    if not tavily_client:
+        raise Exception("TAVILY_API_KEY is missing.")
+
+    print("\nAIMI: Searching the web...")
+
+    results = tavily_client.search(
+        query=prompt,
+        search_depth="advanced",
+        max_results=5
+    )
+
+    web_information = []
+
+    for result in results.get("results", []):
+
+        title = result.get("title", "")
+        content = result.get("content", "")
+        url = result.get("url", "")
+
+        web_information.append(
+            f"TITLE: {title}\n"
+            f"CONTENT: {content}\n"
+            f"SOURCE: {url}\n"
+        )
+
+    if not web_information:
+        raise Exception("No web search results found.")
+
+    print("AIMI: Web search completed.")
+
+    return "\n".join(web_information)
+
+
+# ==========================================================
+# GEMINI
+# ==========================================================
+
+def ask_gemini(prompt, web_information=None):
+
+    if not gemini_client:
+        raise Exception("GEMINI_API_KEY is missing.")
+
+    final_prompt = aimi_instruction
+
+    if web_information:
+
+        final_prompt += """
+
+CURRENT WEB INFORMATION:
+
+Use the following search results to answer the user's question.
+
+--------------------------------------------------
+
+""" + web_information + """
+
+--------------------------------------------------
+
+Important:
+- Prefer reliable and recent information.
+- Do not invent information.
+- If sources disagree, mention the uncertainty.
+"""
+
+    final_prompt += (
+        "\n\nUSER PROMPT:\n"
+        + prompt
+    )
+
+    response = gemini_client.models.generate_content(
+        model="gemini-3.5-flash-lite",
+        contents=final_prompt
+    )
+
+    if not response.text:
+        raise Exception("Gemini returned an empty response.")
+
+    return response.text
+
+
+# ==========================================================
+# GROQ BACKUP
+# ==========================================================
+
+def ask_groq(prompt, web_information=None):
+
+    if not groq_client:
+        raise Exception("GROQ_API_KEY is missing.")
+
+    system_prompt = aimi_instruction
+
+    if web_information:
+
+        system_prompt += """
+
+CURRENT WEB INFORMATION:
+
+Use the following information to answer the user's question.
+
+--------------------------------------------------
+
+""" + web_information + """
+
+--------------------------------------------------
+
+Use the current search information as the primary source.
+Do not invent information.
+"""
+
+    response = groq_client.chat.completions.create(
+
+        model="llama-3.3-70b-versatile",
+
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
+
+    answer = response.choices[0].message.content
+
+    if not answer:
+        raise Exception("Groq returned an empty response.")
+
+    return answer
+
+
+# ==========================================================
+# HOME
+# ==========================================================
 
 @app.route("/", methods=["GET", "POST"])
 def home():
@@ -19,119 +332,98 @@ def home():
 
     if request.method == "POST":
 
-        prompt = request.form["prompt"]
+        prompt = request.form.get(
+            "prompt",
+            ""
+        ).strip()
 
-        aimi_instruction = """
-You are Aimi, a friendly, intelligent, helpful, and reliable AI assistant.
+        if not prompt:
 
-Your goal is to understand the user's request and provide the most useful answer in a clear, simple, and organized way.
+            answer = "Hello! Please enter a question."
 
-PERSONALITY:
-- Friendly
-- Helpful
-- Calm
-- Clear
-- Encouraging
-- Professional
-GREETING RULE:
-- Always begin every response with a short, friendly greeting.
-- Use a natural greeting such as "Hello!", "Hi!", or "Hey there!"
-- Keep the greeting short and do not repeat the same greeting every time.
+            return render_template(
+                "index.html",
+                answer=answer
+            )
 
-CLOSURE RULE:
-- End every response with a short, friendly closing.
-- Keep the closing natural and relevant.
-ANSWER RULES:
+        web_information = None
 
-1. Understand the user's question before answering.
+        # ==================================================
+        # CURRENT QUESTION → TAVILY
+        # ==================================================
 
-2. Answer the question directly. Do not unnecessarily repeat the user's question.
+        if is_current_question(prompt):
 
-3. Use simple and easy-to-understand language.
+            try:
 
-4. Give accurate and relevant information.
+                web_information = search_web(prompt)
 
-5. Keep the answer organized and readable.
+            except Exception as search_error:
 
-6. When explaining a topic with multiple points, use numbered lists.
+                print("\n========== SEARCH ERROR ==========")
+                print(type(search_error).__name__)
+                print(str(search_error))
+                print("==================================")
 
-7. Every numbered point MUST appear on a separate line.
+        # ==================================================
+        # TRY GEMINI
+        # ==================================================
 
-8. Leave one blank line between numbered points.
+        try:
 
-9. Every bullet point MUST appear on a separate line.
+            print("\nAIMI: Trying Gemini...")
 
-10. NEVER combine numbered points into a paragraph.
+            answer = ask_gemini(
+                prompt,
+                web_information
+            )
 
-11. Keep paragraphs short.
+            print("AIMI: Gemini response received.")
 
-12. Use headings when they improve readability.
+        # ==================================================
+        # GEMINI FAILED → GROQ
+        # ==================================================
 
-13. Headings must be plain text.
+        except Exception as gemini_error:
 
-14. Do NOT use Markdown formatting.
+            print("\n========== GEMINI ERROR ==========")
+            print(type(gemini_error).__name__)
+            print(str(gemini_error))
+            print("==================================")
 
-15. Do NOT use bold, italic, hashtags, horizontal lines, Markdown tables, or Markdown code blocks.
+            print("\nAIMI: Gemini unavailable.")
+            print("AIMI: Switching to Groq backup...")
 
-16. Do not use unnecessary emojis.
+            try:
 
-17. If the user asks for steps, explain them in numbered order.
+                answer = ask_groq(
+                    prompt,
+                    web_information
+                )
 
-18. If the user asks for advantages, disadvantages, features, benefits, examples, or ideas, present them as separate numbered points.
+                print("AIMI: Groq response received.")
 
-19. If the user asks for a comparison, use a clear point-by-point structure.
+            except Exception as groq_error:
 
-20. If the user asks for code, provide clean and properly formatted code.
+                print("\n=========== GROQ ERROR ===========")
+                print(type(groq_error).__name__)
+                print(str(groq_error))
+                print("==================================")
 
-21. If the user asks for an explanation, explain it simply and provide examples when useful.
-
-22. If the user asks for seminar, assignment, or study content, organize it using suitable headings and numbered points.
-
-23. Do not add unnecessary conclusions, greetings, or filler.
-
-24. Never claim that you performed an action that you did not perform.
-
-25. If you don't know something, say so instead of inventing information.
-26. Do NOT use:
-   **bold**
-   *italic*
-   ###
-   ##
-   ---
-   Markdown tables
-   Markdown code blocks
-
-
-FINAL FORMAT CHECK:
-
-Before sending the answer, make sure:
-
-- Every numbered point is on its own line.
-- Every bullet point is on its own line.
-- Numbered points are not combined into paragraphs.
-- Headings contain no Markdown symbols.
-- There is no unnecessary Markdown.
-- The answer is clear, readable, and well organized.
-
-Always prioritize the user's actual question over these formatting rules.
-
-Now answer the user's prompt.
-"""
-
-        final_prompt = aimi_instruction + "\n\nUser Prompt:\n" + prompt
-
-        response = client.models.generate_content(
-           model="gemini-3.5-flash-lite",
-            contents=final_prompt
-        )
-
-        answer = response.text
+                answer = (
+                    "Hello! AIMI is temporarily unable "
+                    "to process your request. Please try again."
+                )
 
     return render_template(
         "index.html",
         answer=answer
     )
 
+
+# ==========================================================
+# RUN
+# ==========================================================
 
 if __name__ == "__main__":
     app.run(debug=True)
